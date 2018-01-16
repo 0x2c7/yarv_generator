@@ -4,6 +4,6 @@ class YarvGenerator
     YarvGenerator::Builder.new.build_from_source(src)
   end
 end
-require 'yarv_generator/instructions'
+require 'yarv_generator/iseq'
 require 'yarv_generator/yarv_generator'
 
