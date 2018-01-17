@@ -1,6 +1,9 @@
 require 'yarv_generator/version'
-require "yarv_generator/yarv_generator"
-
 class YarvGenerator
-  # Your code goes here...
+  def self.build_from_source(src)
+    YarvGenerator::Builder.new.build_from_source(src)
+  end
 end
+require 'yarv_generator/iseq'
+require 'yarv_generator/yarv_generator'
+
