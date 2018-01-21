@@ -59,6 +59,8 @@ yarv_builder_build_yarv_tree(rb_iseq_t *iseq)
   rb_funcall(iseq_object, rb_intern("local_size="), 1, INT2FIX(iseq->body->local_size));
   rb_funcall(iseq_object, rb_intern("stack_max="), 1, INT2FIX(iseq->body->stack_max));
 
+  st_free_table(labels_table);
+
   return iseq_object;
 }
 
@@ -214,6 +216,22 @@ yarv_builder_instructions(rb_iseq_t *iseq, st_table *labels_table)
     VALUE insn_object = rb_funcall(instruction_builder, rb_intern("build"), 2, rb_str_new2(insn_name(insn)), operands);
     rb_ary_push(instructions, insn_object);
   }
+
+  for (unsigned int i = 0, pos = 0, line_pos = 0; i < RARRAY_LEN(instructions); i++) {
+    VALUE instruction = RARRAY_AREF(instructions, i);
+
+    st_data_t label;
+    if (st_lookup(labels_table, pos, &label)) {
+      rb_funcall(instruction, rb_intern("label="), 1, label);
+    }
+
+    if (line_pos < iseq->body->line_info_size && iseq->body->line_info_table[line_pos].position == pos) {
+      rb_funcall(instruction, rb_intern("line_no="), 1, INT2FIX(iseq->body->line_info_table[line_pos].line_no));
+      line_pos++;
+    }
+    pos += RARRAY_LENINT(rb_funcall(instruction, rb_intern("operands"), 0)) + 1;
+  }
+
   return instructions;
 }
 
@@ -358,11 +376,10 @@ obj_resurrect(VALUE obj)
   return obj;
 }
 
-// Private method copied from iseq.c
 VALUE
 register_label(struct st_table *table, unsigned long idx)
 {
-  VALUE sym = rb_str_intern(rb_sprintf("label_%lu", idx));
+  VALUE sym = INT2FIX(idx);
   st_insert(table, idx, sym);
   return sym;
 }
