@@ -51,6 +51,14 @@ yarv_builder_build_yarv_tree(rb_iseq_t *iseq)
   VALUE instructions = yarv_builder_instructions(iseq, labels_table);
   rb_funcall(iseq_object, rb_intern("instructions="), 1, instructions);
 
+  rb_funcall(iseq_object, rb_intern("label="), 1, iseq->body->location.label);
+  rb_funcall(iseq_object, rb_intern("path="), 1, iseq->body->location.path);
+  rb_funcall(iseq_object, rb_intern("absolute_path="), 1, iseq->body->location.absolute_path);
+  rb_funcall(iseq_object, rb_intern("first_lineno="), 1, iseq->body->location.first_lineno);
+  rb_funcall(iseq_object, rb_intern("arg_size="), 1, INT2FIX(iseq->body->param.size));
+  rb_funcall(iseq_object, rb_intern("local_size="), 1, INT2FIX(iseq->body->local_size));
+  rb_funcall(iseq_object, rb_intern("stack_max="), 1, INT2FIX(iseq->body->stack_max));
+
   return iseq_object;
 }
 
