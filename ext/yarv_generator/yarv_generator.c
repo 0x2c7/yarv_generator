@@ -15,6 +15,7 @@ VALUE yarv_builder_insn_type(rb_iseq_t *iseq);
 VALUE yarv_builder_local_table(rb_iseq_t *iseq);
 VALUE yarv_builder_instructions(rb_iseq_t *iseq, st_table *labels_table);
 VALUE yarv_builder_params(rb_iseq_t *iseq, st_table *labels_table);
+VALUE yarv_builder_catch_table(rb_iseq_t *iseq, st_table *labels_table);
 VALUE yarv_builder_call_info(VALUE *seq);
 VALUE obj_resurrect(VALUE obj);
 VALUE register_label(struct st_table *table, unsigned long idx);
@@ -37,12 +38,18 @@ yarv_builder_build_yarv_tree(rb_iseq_t *iseq)
 
   VALUE type = yarv_builder_insn_type(iseq);
   rb_funcall(iseq_object, rb_intern("type="), 1, type);
+
   VALUE local_table = yarv_builder_local_table(iseq);
   rb_funcall(iseq_object, rb_intern("local_table="), 1, local_table);
-  VALUE instructions = yarv_builder_instructions(iseq, labels_table);
-  rb_funcall(iseq_object, rb_intern("instructions="), 1, instructions);
+
   VALUE params = yarv_builder_params(iseq, labels_table);
   rb_funcall(iseq_object, rb_intern("params="), 1, params);
+
+  VALUE catch_table = yarv_builder_catch_table(iseq, labels_table);
+  rb_funcall(iseq_object, rb_intern("catch_table="), 1, catch_table);
+
+  VALUE instructions = yarv_builder_instructions(iseq, labels_table);
+  rb_funcall(iseq_object, rb_intern("instructions="), 1, instructions);
 
   return iseq_object;
 }
@@ -256,6 +263,50 @@ VALUE yarv_builder_params(rb_iseq_t *iseq, st_table *labels_table) {
   }
 
   return params;
+}
+
+VALUE yarv_builder_catch_table(rb_iseq_t *iseq, st_table *labels_table) {
+  VALUE catch_table = rb_ary_new();
+  VALUE rb_cYarvCatchEntry = rb_path2class("YarvGenerator::CatchEntry");
+
+  if (iseq->body->catch_table) {
+    for (int i = 0; i < iseq->body->catch_table->size; i++) {
+      VALUE catch_entry = rb_funcall(rb_cYarvCatchEntry, rb_intern("new"), 0);
+
+      const struct iseq_catch_table_entry *entry = &iseq->body->catch_table->entries[i];
+      VALUE type;
+      switch (entry->type) {
+        case CATCH_TYPE_RESCUE:
+          type = ID2SYM(rb_intern("rescue")); break;
+        case CATCH_TYPE_ENSURE:
+          type = ID2SYM(rb_intern("ensure")); break;
+        case CATCH_TYPE_RETRY:
+          type = ID2SYM(rb_intern("retry"));  break;
+        case CATCH_TYPE_BREAK:
+          type = ID2SYM(rb_intern("break"));  break;
+        case CATCH_TYPE_REDO:
+          type = ID2SYM(rb_intern("redo"));   break;
+        case CATCH_TYPE_NEXT:
+          type = ID2SYM(rb_intern("next"));   break;
+        default:
+          rb_bug("unknown catch type %d", (int)entry->type);
+      }
+      rb_funcall(catch_entry, rb_intern("type="), 1, type);
+
+      if (entry->iseq) {
+        VALUE catch_iseq = yarv_builder_build_yarv_tree((rb_iseq_t *)rb_iseq_check(entry->iseq));
+        rb_funcall(catch_entry, rb_intern("iseq="), 1, catch_iseq);
+      }
+
+      rb_funcall(catch_entry, rb_intern("catch_start="), 1, register_label(labels_table, entry->start));
+      rb_funcall(catch_entry, rb_intern("catch_end="), 1, register_label(labels_table, entry->end));
+      rb_funcall(catch_entry, rb_intern("catch_continue="), 1, register_label(labels_table, entry->cont));
+      rb_funcall(catch_entry, rb_intern("sp="), 1, UINT2NUM(entry->sp));
+
+      rb_ary_push(catch_table, catch_entry);
+    }
+  }
+  return catch_table;
 }
 
 VALUE
