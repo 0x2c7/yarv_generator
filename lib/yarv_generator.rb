@@ -5,5 +5,6 @@ class YarvGenerator
   end
 end
 require 'yarv_generator/iseq'
+require 'yarv_generator/instruction'
 require 'yarv_generator/yarv_generator'
 

@@ -108,7 +108,8 @@ VALUE
 yarv_builder_instructions(rb_iseq_t *iseq, st_table *labels_table)
 {
   VALUE instructions = rb_ary_new();
-  VALUE rb_cYarvInstruction = rb_path2class("YarvGenerator::Instruction");
+  VALUE rb_cYarvIBuilder = rb_path2class("YarvGenerator::InstructionBuilder");
+  VALUE instruction_builder = rb_funcall(rb_cYarvIBuilder, rb_intern("new"), 0);
 
   VALUE *iseq_original = rb_iseq_original_iseq((rb_iseq_t *)iseq);
 
@@ -195,9 +196,7 @@ yarv_builder_instructions(rb_iseq_t *iseq, st_table *labels_table)
       rb_ary_push(operands, operand);
     }
 
-    VALUE insn_object = rb_funcall(rb_cYarvInstruction, rb_intern("new"), 0);
-    rb_funcall(insn_object, rb_intern("name="), 1, rb_str_new2(insn_name(insn)));
-    rb_funcall(insn_object, rb_intern("operands="), 1, operands);
+    VALUE insn_object = rb_funcall(instruction_builder, rb_intern("build"), 2, rb_str_new2(insn_name(insn)), operands);
     rb_ary_push(instructions, insn_object);
   }
   return instructions;
