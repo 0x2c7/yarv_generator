@@ -13,7 +13,9 @@ VALUE yarv_builder_build_from_source(VALUE self, VALUE src);
 VALUE yarv_builder_build_yarv_tree(rb_iseq_t *iseq);
 VALUE yarv_builder_insn_type(rb_iseq_t *iseq);
 VALUE yarv_builder_local_table(rb_iseq_t *iseq);
-VALUE yarv_builder_instructions(rb_iseq_t *iseq);
+VALUE yarv_builder_instructions(rb_iseq_t *iseq, st_table *labels_table);
+VALUE yarv_builder_params(rb_iseq_t *iseq, st_table *labels_table);
+VALUE yarv_builder_catch_table(rb_iseq_t *iseq, st_table *labels_table);
 VALUE yarv_builder_call_info(VALUE *seq);
 VALUE obj_resurrect(VALUE obj);
 VALUE register_label(struct st_table *table, unsigned long idx);
@@ -32,12 +34,32 @@ yarv_builder_build_yarv_tree(rb_iseq_t *iseq)
   VALUE rb_cYarvIseq = rb_path2class("YarvGenerator::Iseq");
   VALUE iseq_object = rb_funcall(rb_cYarvIseq, rb_intern("new"), 0);
 
+  struct st_table *labels_table = st_init_numtable();
+
   VALUE type = yarv_builder_insn_type(iseq);
   rb_funcall(iseq_object, rb_intern("type="), 1, type);
+
   VALUE local_table = yarv_builder_local_table(iseq);
   rb_funcall(iseq_object, rb_intern("local_table="), 1, local_table);
-  VALUE instructions = yarv_builder_instructions(iseq);
+
+  VALUE params = yarv_builder_params(iseq, labels_table);
+  rb_funcall(iseq_object, rb_intern("params="), 1, params);
+
+  VALUE catch_table = yarv_builder_catch_table(iseq, labels_table);
+  rb_funcall(iseq_object, rb_intern("catch_table="), 1, catch_table);
+
+  VALUE instructions = yarv_builder_instructions(iseq, labels_table);
   rb_funcall(iseq_object, rb_intern("instructions="), 1, instructions);
+
+  rb_funcall(iseq_object, rb_intern("label="), 1, iseq->body->location.label);
+  rb_funcall(iseq_object, rb_intern("path="), 1, iseq->body->location.path);
+  rb_funcall(iseq_object, rb_intern("absolute_path="), 1, iseq->body->location.absolute_path);
+  rb_funcall(iseq_object, rb_intern("first_lineno="), 1, iseq->body->location.first_lineno);
+  rb_funcall(iseq_object, rb_intern("arg_size="), 1, INT2FIX(iseq->body->param.size));
+  rb_funcall(iseq_object, rb_intern("local_size="), 1, INT2FIX(iseq->body->local_size));
+  rb_funcall(iseq_object, rb_intern("stack_max="), 1, INT2FIX(iseq->body->stack_max));
+
+  st_free_table(labels_table);
 
   return iseq_object;
 }
@@ -85,7 +107,12 @@ yarv_builder_local_table(rb_iseq_t *iseq)
   for (unsigned int i = 0; i < iseq->body->local_table_size; i++) {
     ID var_id = iseq->body->local_table[i];
     if (var_id) {
-      rb_ary_push(local_table, ID2SYM(var_id));
+      if (rb_id2str(var_id)) {
+        rb_ary_push(local_table, ID2SYM(var_id));
+      }
+      else { /* Fix weird ID problem. This fix comes from iseq.c */
+        rb_ary_push(local_table, ULONG2NUM(iseq->body->local_table_size-i+1));
+      }
     } else {
       rb_ary_push(local_table, ID2SYM(rb_intern("arg_rest")));
     }
@@ -95,13 +122,13 @@ yarv_builder_local_table(rb_iseq_t *iseq)
 
 
 VALUE
-yarv_builder_instructions(rb_iseq_t *iseq)
+yarv_builder_instructions(rb_iseq_t *iseq, st_table *labels_table)
 {
   VALUE instructions = rb_ary_new();
-  VALUE rb_cYarvInstruction = rb_path2class("YarvGenerator::Instruction");
+  VALUE rb_cYarvIBuilder = rb_path2class("YarvGenerator::InstructionBuilder");
+  VALUE instruction_builder = rb_funcall(rb_cYarvIBuilder, rb_intern("new"), 0);
 
   VALUE *iseq_original = rb_iseq_original_iseq((rb_iseq_t *)iseq);
-  struct st_table *labels_table = st_init_numtable();
 
   for (VALUE *seq = iseq_original; seq < iseq_original + iseq->body->iseq_size; ) {
     VALUE insn = *seq++;
@@ -186,12 +213,126 @@ yarv_builder_instructions(rb_iseq_t *iseq)
       rb_ary_push(operands, operand);
     }
 
-    VALUE insn_object = rb_funcall(rb_cYarvInstruction, rb_intern("new"), 0);
-    rb_funcall(insn_object, rb_intern("name="), 1, rb_str_new2(insn_name(insn)));
-    rb_funcall(insn_object, rb_intern("operands="), 1, operands);
+    VALUE insn_object = rb_funcall(instruction_builder, rb_intern("build"), 2, rb_str_new2(insn_name(insn)), operands);
     rb_ary_push(instructions, insn_object);
   }
+
+  for (unsigned int i = 0, pos = 0, line_pos = 0; i < RARRAY_LEN(instructions); i++) {
+    VALUE instruction = RARRAY_AREF(instructions, i);
+
+    st_data_t label;
+    if (st_lookup(labels_table, pos, &label)) {
+      rb_funcall(instruction, rb_intern("label="), 1, label);
+    }
+
+    if (line_pos < iseq->body->line_info_size && iseq->body->line_info_table[line_pos].position == pos) {
+      rb_funcall(instruction, rb_intern("line_no="), 1, INT2FIX(iseq->body->line_info_table[line_pos].line_no));
+      line_pos++;
+    }
+    pos += RARRAY_LENINT(rb_funcall(instruction, rb_intern("operands"), 0)) + 1;
+  }
+
   return instructions;
+}
+
+VALUE yarv_builder_params(rb_iseq_t *iseq, st_table *labels_table) {
+  VALUE params = rb_hash_new();
+
+  if (iseq->body->param.flags.has_lead) {
+    rb_hash_aset(params, ID2SYM(rb_intern("lead_num")), INT2FIX(iseq->body->param.lead_num));
+  }
+
+  if (iseq->body->param.flags.has_opt) {
+    VALUE opts = rb_ary_new2(iseq->body->param.opt_num);
+    for (int i = 0; i < iseq->body->param.opt_num; i++) {
+      VALUE value = iseq->body->param.opt_table[i];
+      register_label(labels_table, value);
+      rb_ary_push(opts, value);
+    }
+    rb_hash_aset(params, ID2SYM(rb_intern("opt")), opts);
+  }
+
+  if (iseq->body->param.flags.has_rest) {
+    rb_hash_aset(params, ID2SYM(rb_intern("rest_start")), INT2FIX(iseq->body->param.rest_start));
+  }
+
+  if (iseq->body->param.flags.has_post) {
+    rb_hash_aset(params, ID2SYM(rb_intern("post_start")), INT2FIX(iseq->body->param.post_start));
+    rb_hash_aset(params, ID2SYM(rb_intern("post_num")), INT2FIX(iseq->body->param.post_num));
+  }
+
+  if (iseq->body->param.flags.has_kw) {
+    VALUE keywords = rb_ary_new();
+    int j = 0;
+    for (int i = 0; i < iseq->body->param.keyword->num; i++) {
+      if (i < iseq->body->param.keyword->required_num) {
+        // Require params
+        rb_ary_push(keywords, ID2SYM(iseq->body->param.keyword->table[i]));
+      } else {
+        VALUE val = rb_ary_new2(2);
+        rb_ary_push(val, ID2SYM(iseq->body->param.keyword->table[i]));
+        rb_ary_push(val, iseq->body->param.keyword->default_values[j]);
+        rb_ary_push(keywords, val);
+        j++;
+      }
+    }
+    rb_hash_aset(params, ID2SYM(rb_intern("kwbits")),INT2FIX(iseq->body->param.keyword->bits_start));
+    rb_hash_aset(params, ID2SYM(rb_intern("keywords")), keywords);
+  }
+
+  if (iseq->body->param.flags.has_kwrest) {
+    rb_hash_aset(params, ID2SYM(rb_intern("kwrest")), INT2FIX(iseq->body->param.rest_start));
+  }
+
+  if (iseq->body->param.flags.has_block) {
+    rb_hash_aset(params, ID2SYM(rb_intern("block_start")), INT2FIX(iseq->body->param.block_start));
+  }
+
+  return params;
+}
+
+VALUE yarv_builder_catch_table(rb_iseq_t *iseq, st_table *labels_table) {
+  VALUE catch_table = rb_ary_new();
+  VALUE rb_cYarvCatchEntry = rb_path2class("YarvGenerator::CatchEntry");
+
+  if (iseq->body->catch_table) {
+    for (int i = 0; i < iseq->body->catch_table->size; i++) {
+      VALUE catch_entry = rb_funcall(rb_cYarvCatchEntry, rb_intern("new"), 0);
+
+      const struct iseq_catch_table_entry *entry = &iseq->body->catch_table->entries[i];
+      VALUE type;
+      switch (entry->type) {
+        case CATCH_TYPE_RESCUE:
+          type = ID2SYM(rb_intern("rescue")); break;
+        case CATCH_TYPE_ENSURE:
+          type = ID2SYM(rb_intern("ensure")); break;
+        case CATCH_TYPE_RETRY:
+          type = ID2SYM(rb_intern("retry"));  break;
+        case CATCH_TYPE_BREAK:
+          type = ID2SYM(rb_intern("break"));  break;
+        case CATCH_TYPE_REDO:
+          type = ID2SYM(rb_intern("redo"));   break;
+        case CATCH_TYPE_NEXT:
+          type = ID2SYM(rb_intern("next"));   break;
+        default:
+          rb_bug("unknown catch type %d", (int)entry->type);
+      }
+      rb_funcall(catch_entry, rb_intern("type="), 1, type);
+
+      if (entry->iseq) {
+        VALUE catch_iseq = yarv_builder_build_yarv_tree((rb_iseq_t *)rb_iseq_check(entry->iseq));
+        rb_funcall(catch_entry, rb_intern("iseq="), 1, catch_iseq);
+      }
+
+      rb_funcall(catch_entry, rb_intern("catch_start="), 1, register_label(labels_table, entry->start));
+      rb_funcall(catch_entry, rb_intern("catch_end="), 1, register_label(labels_table, entry->end));
+      rb_funcall(catch_entry, rb_intern("catch_continue="), 1, register_label(labels_table, entry->cont));
+      rb_funcall(catch_entry, rb_intern("sp="), 1, UINT2NUM(entry->sp));
+
+      rb_ary_push(catch_table, catch_entry);
+    }
+  }
+  return catch_table;
 }
 
 VALUE
@@ -235,11 +376,10 @@ obj_resurrect(VALUE obj)
   return obj;
 }
 
-// Private method copied from iseq.c
 VALUE
 register_label(struct st_table *table, unsigned long idx)
 {
-  VALUE sym = rb_str_intern(rb_sprintf("label_%lu", idx));
+  VALUE sym = INT2FIX(idx);
   st_insert(table, idx, sym);
   return sym;
 }
